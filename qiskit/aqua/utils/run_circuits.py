@@ -195,6 +195,17 @@ def run_qobj(qobj, backend, qjob_config=None, backend_options=None,
         ValueError: invalid backend
         AquaError: Any error except for JobError raised by Qiskit Terra
     """
+    def _job_status_callback(c_job_id, c_status, c_job, **kwargs):
+        """Callback function used to report job status."""
+        queue_info = kwargs.pop('queue_info', None)
+        if c_status is JobStatus.QUEUED and queue_info:
+            logger.info("Job id: %s is queued at position %s", c_job_id, queue_info.position)
+        else:
+            logger.info("Job id: %s, status: %s", job_id, job_status)
+        if job_callback is not None:
+            job_callback(job_id, job_status, queue_position, job)
+
+
     qjob_config = qjob_config or {}
     backend_options = backend_options or {}
     noise_config = noise_config or {}
@@ -234,6 +245,7 @@ def run_qobj(qobj, backend, qjob_config=None, backend_options=None,
             while True:
                 logger.info("Running %s-th qobj, job id: %s", idx, job_id)
                 # try to get result if possible
+                job.wait_for_final_state(wait=qjob_config['wait'], callback=job_callback)
                 while True:
                     job_status = _safe_get_job_status(job, job_id)
                     queue_position = 0
