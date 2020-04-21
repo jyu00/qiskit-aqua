@@ -23,7 +23,6 @@ import uuid
 
 import numpy as np
 from qiskit.providers import BaseBackend, JobStatus, JobError
-from qiskit.providers.jobstatus import JOB_FINAL_STATES
 from qiskit.providers.basicaer import BasicAerJob
 from qiskit.qobj import QasmQobj
 from qiskit.aqua.aqua_error import AquaError
@@ -198,13 +197,16 @@ def run_qobj(qobj, backend, qjob_config=None, backend_options=None,
     def _job_status_callback(c_job_id, c_status, c_job, **kwargs):
         """Callback function used to report job status."""
         queue_info = kwargs.pop('queue_info', None)
-        if c_status is JobStatus.QUEUED and queue_info:
-            logger.info("Job id: %s is queued at position %s", c_job_id, queue_info.position)
-        else:
-            logger.info("Job id: %s, status: %s", job_id, job_status)
-        if job_callback is not None:
-            job_callback(job_id, job_status, queue_position, job)
+        queue_position = getattr(queue_info, 'position', None)
+        est_start_time = getattr(queue_info, 'estimated_start_time', None)
 
+        if c_status is JobStatus.QUEUED:
+            logger.info("Job id: %s is queued, position=%s, estimated start time=%s",
+                        c_job_id, queue_position, est_start_time)
+        else:
+            logger.info("Job id: %s, status: %s", c_job_id, c_status)
+        if job_callback is not None:
+            job_callback(c_job_id, c_status, queue_position, c_job)
 
     qjob_config = qjob_config or {}
     backend_options = backend_options or {}
@@ -244,39 +246,24 @@ def run_qobj(qobj, backend, qjob_config=None, backend_options=None,
             job_id = job_ids[idx]
             while True:
                 logger.info("Running %s-th qobj, job id: %s", idx, job_id)
-                # try to get result if possible
-                job.wait_for_final_state(wait=qjob_config['wait'], callback=job_callback)
-                while True:
-                    job_status = _safe_get_job_status(job, job_id)
-                    queue_position = 0
-                    if job_status in JOB_FINAL_STATES:
-                        # do callback again after the job is in the final states
-                        if job_callback is not None:
-                            job_callback(job_id, job_status, queue_position, job)
-                        break
-                    if job_status == JobStatus.QUEUED:
-                        queue_position = job.queue_position()
-                        logger.info("Job id: %s is queued at position %s", job_id, queue_position)
-                    else:
-                        logger.info("Job id: %s, status: %s", job_id, job_status)
-                    if job_callback is not None:
-                        job_callback(job_id, job_status, queue_position, job)
-                    time.sleep(qjob_config['wait'])
+                # Wait for job to finish.
+                job.wait_for_final_state(wait=qjob_config.get('wait', 5), callback=_job_status_callback)
+                # Get final status.
+                job_status = _safe_get_job_status(job, job_id)
+
+                # do callback again after the job is in the final states
+                if job_callback is not None:
+                    job_callback(job_id, job_status, None, job)
 
                 # get result after the status is DONE
                 if job_status == JobStatus.DONE:
-                    while True:
-                        result = job.result(**qjob_config)
-                        if result.success:
-                            results.append(result)
-                            logger.info("COMPLETED the %s-th qobj, job id: %s", idx, job_id)
-                            break
+                    result = job.result(**qjob_config)
+                    if result.success:
+                        results.append(result)
+                        logger.info("COMPLETED the %s-th qobj, job id: %s", idx, job_id)
+                        break
+                    logger.warning("FAILURE: Job id: %s failed. Re-submitting the Qobj.", job_id)
 
-                        logger.warning("FAILURE: Job id: %s", job_id)
-                        logger.warning("Job (%s) is completed anyway, retrieve result "
-                                       "from backend again.", job_id)
-                        job = backend.retrieve_job(job_id)
-                    break
                 # for other cases, resubmit the qobj until the result is available.
                 # since if there is no result returned, there is no way algorithm can do any process
                 # get back the qobj first to avoid for job is consumed
